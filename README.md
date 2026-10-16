@@ -1,5 +1,9 @@
 # dan-huang-pai-qvq
 
+## AURA 光感实验室
+
+一个无需安装依赖的单页创意工作室网站。直接在浏览器中打开 `index.html` 即可预览；移动端自适应，背景粒子会缓慢漂浮，点击时形成柔和涟漪。作品图片来自 Unsplash，需要联网加载。
+
 ## GitHub Copilot agent
 
 This repository includes the **Office and Development Partner** custom agent in `.github/agents/office-development.agent.md`. In a Copilot experience that supports repository custom agents, open the agent picker and select **Office and Development Partner**. If it is not listed, confirm the repository is available to that Copilot experience and that custom agents are supported there.
