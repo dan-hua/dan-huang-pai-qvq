@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import re
 import ssl
 import threading
@@ -29,6 +30,7 @@ ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
+    "/site_config.js": ("site_config.js", "text/javascript; charset=utf-8"),
     "/job_finder.js": ("job_finder.js", "text/javascript; charset=utf-8"),
 }
 
@@ -216,6 +218,32 @@ class AppRequestHandler(BaseHTTPRequestHandler):
     server_version = "Shitu"
     sys_version = ""
 
+    def _expected_host(self) -> str:
+        configured_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+        external_url = os.environ.get("RENDER_EXTERNAL_URL")
+        if configured_host:
+            return configured_host
+        if external_url:
+            return urlsplit(external_url).netloc
+        return f"127.0.0.1:{self.server.server_port}"
+
+    def _allowed_origins(self) -> set[str]:
+        local_origin = f"http://127.0.0.1:{self.server.server_port}"
+        configured = os.environ.get("ALLOWED_ORIGINS", "")
+        return {local_origin, *(origin.strip() for origin in configured.split(",") if origin.strip())}
+
+    def _valid_host(self) -> bool:
+        return self.headers.get("Host") == self._expected_host()
+
+    def _validate_origin(self, *, required: bool = False) -> bool:
+        origin = self.headers.get("Origin")
+        if origin is None and not required:
+            return True
+        if origin in self._allowed_origins():
+            return True
+        self._send_json(403, {"error": "Invalid Origin"})
+        return False
+
     def _security_headers(self) -> None:
         self.send_header(
             "Content-Security-Policy",
@@ -233,6 +261,10 @@ class AppRequestHandler(BaseHTTPRequestHandler):
     def _send(self, status: int, content_type: str, body: bytes) -> None:
         self.send_response(status)
         self._security_headers()
+        origin = self.headers.get("Origin")
+        if origin in self._allowed_origins():
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -243,12 +275,13 @@ class AppRequestHandler(BaseHTTPRequestHandler):
         self._send(status, "application/json; charset=utf-8", body)
 
     def do_GET(self) -> None:
-        expected_host = f"127.0.0.1:{self.server.server_port}"
-        if self.headers.get("Host") != expected_host:
+        if not self._valid_host():
             self._send_json(403, {"error": "Invalid Host"})
             return
         request_path = urlsplit(self.path)
         if request_path.path == "/api/jobs":
+            if not self._validate_origin():
+                return
             if request_path.query:
                 self._send_json(400, {"error": "搜索参数不被接受；岗位仅在浏览器本地匹配。"})
                 return
@@ -273,8 +306,7 @@ class AppRequestHandler(BaseHTTPRequestHandler):
         self._send(200, content_type, body)
 
     def do_POST(self) -> None:
-        expected_host = f"127.0.0.1:{self.server.server_port}"
-        if self.headers.get("Host") != expected_host:
+        if not self._valid_host():
             self._send_json(403, {"error": "Invalid Host"})
             return
         if urlsplit(self.path).path == "/api/jobs":
@@ -283,8 +315,7 @@ class AppRequestHandler(BaseHTTPRequestHandler):
         if urlsplit(self.path).path != "/api/translate" or urlsplit(self.path).query:
             self._send_json(404, {"error": "Not found"})
             return
-        if self.headers.get("Origin") not in (None, f"http://{expected_host}"):
-            self._send_json(403, {"error": "Invalid Origin"})
+        if not self._validate_origin(required=True):
             return
         if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
             self._send_json(415, {"error": "Content-Type must be application/json"})
@@ -316,15 +347,46 @@ class AppRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(200, {**translated, "provider": "MyMemory"})
 
+    def do_OPTIONS(self) -> None:
+        if not self._valid_host():
+            self._send_json(403, {"error": "Invalid Host"})
+            return
+        if urlsplit(self.path).path != "/api/translate" or urlsplit(self.path).query:
+            self._send_json(404, {"error": "Not found"})
+            return
+        if not self._validate_origin(required=True):
+            return
+        if self.headers.get("Access-Control-Request-Method") != "POST":
+            self._send_json(405, {"error": "Method is not allowed"})
+            return
+        requested_headers = {
+            header.strip().lower()
+            for header in self.headers.get("Access-Control-Request-Headers", "").split(",")
+            if header.strip()
+        }
+        if not requested_headers.issubset({"content-type", "accept"}):
+            self._send_json(403, {"error": "Request headers are not allowed"})
+            return
+        self.send_response(204)
+        self._security_headers()
+        self.send_header("Access-Control-Allow-Origin", self.headers["Origin"])
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Accept")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.send_header("Vary", "Origin")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def log_message(self, format: str, *args: Any) -> None:
-        print(f"{self.address_string()} - {format % args}")
+        print(f"{self.command} {urlsplit(self.path).path} - {args[1] if len(args) > 1 else 'request'}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the Shitu job-search app on this computer only.")
-    parser.add_argument("--port", type=int, default=8765, help="Local web port (default: 8765)")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind address (keep 127.0.0.1 for local use)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8765")), help="Web port (default: 8765)")
     args = parser.parse_args()
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), AppRequestHandler)
+    server = ThreadingHTTPServer((args.host, args.port), AppRequestHandler)
     server.daemon_threads = True
     print(f"拾途已启动，仅本机可访问：http://127.0.0.1:{args.port}/")
     print("按 Ctrl+C 停止。浏览器条件不会发送到岗位 API。")
