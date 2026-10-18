@@ -6,8 +6,9 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  const API_URL = "/api/jobs";
-  const TRANSLATION_API_URL = "/api/translate";
+  const API_BASE_URL = String(root && root.SHITU_API_BASE_URL || "").replace(/\/+$/, "");
+  const API_URL = `${API_BASE_URL}/api/jobs`;
+  const TRANSLATION_API_URL = `${API_BASE_URL}/api/translate`;
   const CACHE_KEY = "shitu.remotive-cache.v1";
   const FETCH_KEY = "shitu.remotive-last-fetch.v1";
   const CACHE_TTL = 12 * 60 * 60 * 1000;

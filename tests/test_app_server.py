@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
@@ -133,6 +134,52 @@ class AppServerSecurityTests(unittest.TestCase):
             self.assertEqual(payload["jobs"][0]["title"], "Example")
             self.assertFalse(payload["cached"])
             self.assertGreater(payload["fetched_at"], 0)
+
+    def test_pages_origin_cors_and_translation_preflight(self):
+        pages_origin = "https://dan-hua.github.io"
+        with patch.dict(os.environ, {"ALLOWED_ORIGINS": pages_origin}):
+            request = Request(f"{self.base_url}/api/jobs", headers={"Origin": pages_origin})
+            with urlopen(request) as response:
+                self.assertEqual(response.headers["Access-Control-Allow-Origin"], pages_origin)
+
+            preflight = Request(
+                f"{self.base_url}/api/translate",
+                method="OPTIONS",
+                headers={
+                    "Origin": pages_origin,
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "content-type, accept",
+                },
+            )
+            with urlopen(preflight) as response:
+                self.assertEqual(response.status, 204)
+                self.assertEqual(response.headers["Access-Control-Allow-Origin"], pages_origin)
+                self.assertEqual(response.headers["Access-Control-Allow-Methods"], "POST, OPTIONS")
+
+        bad_origin = Request(
+            f"{self.base_url}/api/jobs",
+            headers={"Origin": "https://untrusted.example"},
+        )
+        with self.assertRaises(HTTPError) as rejected:
+            urlopen(bad_origin)
+        self.assertEqual(rejected.exception.code, 403)
+
+    def test_hosted_api_accepts_configured_render_hostname(self):
+        origin = "https://dan-hua.github.io"
+        with patch.dict(
+            os.environ,
+            {
+                "ALLOWED_ORIGINS": origin,
+                "RENDER_EXTERNAL_URL": "https://shitu-api.onrender.com",
+            },
+        ):
+            request = Request(
+                f"{self.base_url}/api/jobs",
+                headers={"Host": "shitu-api.onrender.com", "Origin": origin},
+            )
+            with urlopen(request) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.headers["Access-Control-Allow-Origin"], origin)
 
     def test_server_rejects_search_queries_and_unlisted_files(self):
         invalid_host = Request(f"{self.base_url}/", headers={"Host": "untrusted.example"})

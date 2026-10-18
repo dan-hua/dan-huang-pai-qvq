@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: shitu-job-search-api
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: python -m unittest discover -q
+    startCommand: python app_server.py --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: ALLOWED_ORIGINS
+        value: https://dan-hua.github.io
