@@ -1,9 +1,9 @@
 (function (root, factory) {
-  const api = factory();
+  const api = factory(root);
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.JobFinder = api;
   if (root && root.document) api.init(root.document);
-})(typeof globalThis !== "undefined" ? globalThis : this, function () {
+})(typeof globalThis !== "undefined" ? globalThis : this, function (root) {
   "use strict";
 
   const API_BASE_URL = String(root && root.SHITU_API_BASE_URL || "").replace(/\/+$/, "");

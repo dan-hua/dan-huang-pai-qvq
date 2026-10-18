@@ -23,6 +23,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.build-site.outputs.configured }}
     steps:
       - uses: actions/checkout@v4
       - name: Configure Pages
@@ -30,6 +32,7 @@ jobs:
       - name: Test frontend
         run: node tests/test_job_finder.js
       - name: Build site
+        id: build-site
         env:
           SHITU_API_BASE_URL: ${{ vars.SHITU_API_BASE_URL }}
         run: |
@@ -41,10 +44,13 @@ jobs:
 
           api_url = os.environ.get("SHITU_API_BASE_URL", "").rstrip("/")
           if not re.fullmatch(r"https://[a-z0-9-]+\.onrender\.com", api_url):
-              raise SystemExit(
-                  "Set the repository Actions variable SHITU_API_BASE_URL "
-                  "to the deployed Render API URL before deploying."
+              print(
+                  "::warning::GitHub Pages deploy skipped: configure "
+                  "SHITU_API_BASE_URL with the deployed Render API URL."
               )
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output_file:
+                  output_file.write("configured=false\n")
+              raise SystemExit(0)
 
           output = Path("site")
           output.mkdir()
@@ -56,13 +62,17 @@ jobs:
               + ";\n",
               encoding="utf-8",
           )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output_file:
+              output_file.write("configured=true\n")
           PY
       - name: Upload Pages artifact
+        if: steps.build-site.outputs.configured == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
   deploy:
+    if: needs.build.outputs.configured == 'true'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
