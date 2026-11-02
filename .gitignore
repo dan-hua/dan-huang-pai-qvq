@@ -2,3 +2,4 @@
 *.pyc
 *.pyo
 paper_output.md
+monitor-evidence.sqlite3*

@@ -49,6 +49,148 @@ node tests/test_job_finder.js
 
 前端不需构建。JavaScript 单测需 Node.js；Python 服务和服务端测试使用标准库。若岗位来源或网络不可用，页面会显示错误和 Remotive 直接搜索入口，不会用示例数据冒充真实职位。
 
+## 局内行为监测原型
+
+仓库包含一个可运行的 Python 遥测检测 MVP，可处理一局的 JSONL 事件并生成结构化风险报告。它使用透明规则与轻量评分给出 `observe`、`review` 或 `kick` 建议；可识别重复的服务器确认隔墙命中、不可见目标准星对齐和极端瞄准变化。**它不执行踢人、不读取屏幕/鼠标、不扫描进程，也不连接或修改 ACE**。
+
+运行仓库内的演示遥测：
+
+```powershell
+python -m game_monitor --input examples\game_telemetry.jsonl
+```
+
+也可将游戏服务端导出的 JSONL 通过标准输入提供：
+
+```powershell
+Get-Content -Encoding utf8 match.jsonl | python -m game_monitor
+```
+
+每行必须是一个 JSON 对象，结构为 `{"timestamp_ms": 1000, "kind": "shot", "data": {...}}`。`aim` 事件需要 `angular_delta_deg`、`reaction_ms`、`target_visible`，可选 `occluded_target_alignment`；`shot` 事件需要 `hit`、`target_visible`、`line_of_sight_blocked`。事件时间戳必须按顺序递增或相等；最多处理 10,000 条事件，单行上限 16 KiB。报告打印到标准输出，格式错误会写到标准错误并以状态码 2 退出。
+
+```python
+from game_monitor import GameMonitor, TelemetryEvent
+
+events = [
+    TelemetryEvent(1000, "aim", {
+        "angular_delta_deg": 8.0,
+        "reaction_ms": 240,
+        "target_visible": True,
+    }),
+    TelemetryEvent(1100, "shot", {
+        "hit": True,
+        "target_visible": True,
+        "line_of_sight_blocked": False,
+    }),
+]
+result = GameMonitor().evaluate(events, ace_status="unavailable")
+print(result.to_dict())
+```
+
+事件字段必须由游戏服务器根据权威对局状态生成，不能直接信任客户端上报。只有在获得 ACE 厂商正式授权的集成后，才可把经认证的完整性状态传入 `ace_status`；默认 `unavailable` 不会影响风险分。当前评分是可解释的规则基线，不是已经训练或验证过的 AI 模型；命中被服务器确认穿过遮挡时，重复达到阈值才建议踢出，其他信号最多建议复核。上线前应使用真实对局数据校准阈值、评估误报，并由游戏服务端决定最终处置。
+
+验证监测器与命令行：
+
+```powershell
+python -m unittest tests.test_game_monitor tests.test_game_monitor_cli -v
+```
+
+### 通用反作弊信号接入与融合
+
+新增 `VendorAntiCheatAdapter` / `AntiCheatIngestor` 接口，可在游戏方提供正式 SDK 后接入完整性告警。厂商 SDK bridge 必须先验证事件来源、签名/授权和时效，再返回 `VerifiedSdkEvent`；未经认证的客户端 JSON 不能直接包装成“已验证”事件。适配器会校验厂商、会话、事件编号与严重级别，拒绝重复告警；接入器将规范化信号持久化到本地 SQLite。**目前没有 ACE 官方 SDK，因此本仓库没有 ACE bridge，也不应把模拟 bridge 当作真实 ACE 接入。**
+
+```python
+from game_monitor import (
+    AntiCheatIngestor,
+    EvidenceFusion,
+    IntegritySignalStore,
+    VendorAntiCheatAdapter,
+)
+
+# OfficialAceSdkBridge is supplied by the game/anti-cheat vendor.
+signals_db = IntegritySignalStore("monitor-evidence.sqlite3")
+adapter = VendorAntiCheatAdapter(
+    OfficialAceSdkBridge(...),
+    expected_vendor="authorized-vendor",
+)
+ingestor = AntiCheatIngestor(adapter, signals_db)
+ingestor.ingest(official_sdk_callback_event)
+
+signals = signals_db.list_signals(session_id="pseudonymous-match-id")
+combined = EvidenceFusion().evaluate(
+    session_id="pseudonymous-match-id",
+    telemetry=server_telemetry_result,
+    frame_evidence=frame_evidence_rows,
+    integrity_signals=signals,
+)
+print(combined.to_dict())
+signals_db.close()
+```
+
+融合报告会保留各来源评分与原因：服务端遥测、逐帧画面证据、反作弊完整性告警。单一最高分作为基线，多个独立来源同时超过复核阈值时增加有限佐证分；默认总分 40 建议复核，90 建议踢出。该结果只是服务端的处置建议，不会执行踢出或封禁；实际策略须由游戏运营方决定并基于授权数据校准。SQLite 可用 `IntegritySignalStore` 和 `LocalEvidenceStore` 查询；`--retention-days` 目前清理视频证据库，部署方还应对完整性信号设置适当留存策略。
+
+### 逐帧画面监测接口
+
+可在本机对自己有权处理的游戏录像逐帧运行演示系统。先安装视频解码依赖，再运行：
+
+```powershell
+python -m pip install -r requirements-game-monitor.txt
+python -m game_monitor --video D:\Videos\match.mp4 --db D:\GameMonitor\evidence.sqlite3
+```
+
+可指定不含真实身份信息的对局 ID、画面变化阈值及证据保留时长：
+
+```powershell
+python -m game_monitor --video D:\Videos\match.mp4 --session-id match-demo --motion-threshold 0.22 --retention-days 7
+```
+
+命令逐帧解码整段录像，转为 320×180 灰度帧后进行轻量视觉变化分析；输出 JSON 汇总帧数、处理速度、最高风险与复核建议。可疑帧元数据立即写入本地 SQLite；默认每次启动清除超过 7 天的旧证据。证据库只保存局次伪名、帧号、时间戳、模型评分和原因代码，**不保存画面像素，也不上传到网络**。录像仅在本机解码处理。
+
+此独立演示使用“画面变化”基线，突变也可能是正常转身、爆炸或切镜，因此结果只是复核线索，**并非训练好的反作弊 AI，也不能单凭画面证明外挂**。真实反作弊应将经验证的视觉模型输出与服务器权威事件融合。要开发授权的实时版本，捕获端可调用下方的 `LiveFrameMonitor` 接口：每帧同步分析，低置信度、可疑标签或高风险帧立即提交本地 SQLite。输入帧最大 4 MiB，帧号需递增。
+
+```python
+from game_monitor import (
+    FrameAssessment,
+    GameFrame,
+    LiveFrameMonitor,
+    LocalEvidenceStore,
+)
+
+class LocalVisionModel:
+    def analyze(self, frame):
+        prediction = your_local_model.predict(frame.image)
+        return FrameAssessment(
+            model_id="your-local-model-version",
+            risk_score=prediction.risk * 100,
+            confidence=prediction.confidence * 100,
+            label=prediction.label,  # normal / suspicious / uncertain
+            reasons=tuple(prediction.reason_codes),
+        )
+
+store = LocalEvidenceStore("monitor-evidence.sqlite3")
+monitor = LiveFrameMonitor(LocalVisionModel(), store)
+decision = monitor.process(GameFrame(
+    session_id="pseudonymous-match-id",
+    frame_index=1,
+    captured_at_ms=16,
+    width=1920,
+    height=1080,
+    image=game_only_frame_bytes,
+))
+print(decision.to_dict())
+print(store.list_evidence(session_id="pseudonymous-match-id"))
+store.close()
+```
+
+`your_local_model` 和 `game_only_frame_bytes` 是授权实时接入点，不包含在独立演示中。`inference_ms` 可用于测量单帧推理耗时；不保证特定帧率，需在目标设备测试。置信不足只记录证据供分析，不会自动处罚；部署前应设计权限控制、证据生命周期和游戏服务端处置。
+
+逐帧管线测试：
+
+```powershell
+python -m unittest tests.test_game_monitor_frames -v
+python -m unittest tests.test_game_monitor_video -v
+python -m unittest tests.test_game_monitor_anticheat -v
+```
+
 ## Python 论文写作 Agent
 
 仓库还保留一个 Python 研究型论文写作 Agent，支持多源文献检索、研究计划、论文草稿、批判式自评和质量评估。
