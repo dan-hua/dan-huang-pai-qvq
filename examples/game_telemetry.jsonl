@@ -1,0 +1,3 @@
+{"timestamp_ms":1000,"kind":"aim","data":{"angular_delta_deg":4.5,"reaction_ms":240,"target_visible":true}}
+{"timestamp_ms":1120,"kind":"aim","data":{"angular_delta_deg":2.0,"reaction_ms":210,"target_visible":false,"occluded_target_alignment":true}}
+{"timestamp_ms":1250,"kind":"shot","data":{"hit":true,"target_visible":false,"line_of_sight_blocked":true}}
